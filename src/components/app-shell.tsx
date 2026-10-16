@@ -32,12 +32,16 @@ export function AppShell({ data }: { data: AppData }) {
     <div className="app-shell">
       <aside className="app-sidebar">
         <div className="brand">
-          <div className="brand-icon">
-            <Coins size={22} />
+          <div className="brand-icon" aria-hidden="true">
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+              <path d="M4 18L9.5 12.5L13.5 16.5L20 8" stroke="white" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round"/>
+              <path d="M15 8H20V13" stroke="white" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round"/>
+              <circle cx="4" cy="18" r="1.5" fill="white" />
+            </svg>
           </div>
           <div>
             <h1>Controle Financeiro</h1>
-            <span>Planejamento Pessoal & Projeção 2027</span>
+            <span>Planejamento Pessoal</span>
           </div>
         </div>
 
