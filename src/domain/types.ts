@@ -32,6 +32,10 @@ export interface ProjectionInput {
   annualContributionIncrease: Money; timing: "START" | "END";
   salaryDay: number; salaryOffset: number; events: ScheduledEvent[];
   extras: { date: string; amount: Money; name: string }[];
+  prioritizeReserve?: boolean;
+  reserveMonths?: number;
+  reserveTarget?: Money;
+  includeBaseline?: boolean;
 }
 export interface ProjectionRow {
   month: string; income: Money; expenses: Money; investment: Money; reserve: Money;

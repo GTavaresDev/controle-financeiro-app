@@ -9,7 +9,9 @@ import {
   Layers,
   BarChart3,
   Table as TableIcon,
-  ArrowRight
+  ArrowRight,
+  CreditCard,
+  ShieldCheck
 } from "lucide-react";
 import type { AppData, ProjectionInput } from "@/domain/types";
 import { accountBalance, budgetFor, cashFlow, d, money, monthDistance, project } from "@/domain/finance";
@@ -63,13 +65,13 @@ export function Projections({ data, month }: { data: AppData; month: string }) {
     }
   }
 
-  // Saldos reais atuais das contas
+  // Saldos reais de abertura considerados em 01/01/2027
   const investAccount = data.accounts.find(a => a.kind === "INVESTMENT");
   const reserveAccount = data.accounts.find(a => a.kind === "RESERVE");
   const cashAccount = data.accounts.find(a => a.kind === "CASH");
-  const initInvest = investAccount ? (accountBalance(investAccount, data.movements, today()) ?? "0") : "0";
-  const initReserve = reserveAccount ? (accountBalance(reserveAccount, data.movements, today()) ?? "0") : "0";
-  const initCash = cashAccount ? (accountBalance(cashAccount, data.movements, today()) ?? "0") : "0";
+  const initInvest = investAccount ? (investAccount.opening ? String(investAccount.opening) : (accountBalance(investAccount, data.movements, today()) ?? "0")) : "0";
+  const initReserve = reserveAccount ? (reserveAccount.opening ? String(reserveAccount.opening) : (accountBalance(reserveAccount, data.movements, today()) ?? "0")) : "0";
+  const initCash = cashAccount ? (cashAccount.opening ? String(cashAccount.opening) : (accountBalance(cashAccount, data.movements, today()) ?? "0")) : "0";
 
   // 3. Resolução dos valores efetivos mensais
   const effectiveSalary = salaryMode === "current" ? baseIncome : (Number(customSalary) || 0);
@@ -82,12 +84,13 @@ export function Projections({ data, month }: { data: AppData; month: string }) {
   const projectedInvestment = Math.round((effectiveSalary * effectiveInvestmentPct) / 100);
   const projectedReserve = Math.round((effectiveSalary * effectiveReservePct) / 100);
 
-  // 4. Cálculo da Projeção Mês a Mês
+  // 4. Cálculo da Projeção Mês a Mês (Início estritamente em Janeiro de 2027 a partir dos Saldos de 01/01/2027)
+  const projectionStartMonth = "2027-01";
   const targetEndMonth = `${targetYear}-12`;
-  const totalMonths = Math.max(1, monthDistance(currentMonth, targetEndMonth) + 1);
+  const totalMonths = Math.max(1, monthDistance(projectionStartMonth, targetEndMonth) + 1);
 
   const projectionInput: ProjectionInput = useMemo(() => ({
-    startMonth: currentMonth,
+    startMonth: projectionStartMonth,
     months: totalMonths,
     salary: money(effectiveSalary),
     expenses: money(projectedExpenses),
@@ -106,8 +109,10 @@ export function Projections({ data, month }: { data: AppData; month: string }) {
     salaryDay: 31,
     salaryOffset: 0,
     events: [],
-    extras: []
-  }), [currentMonth, totalMonths, effectiveSalary, projectedExpenses, projectedInvestment, projectedReserve, initInvest, initReserve, initCash, annualRate]);
+    extras: [],
+    prioritizeReserve: false,
+    includeBaseline: false,
+  }), [totalMonths, effectiveSalary, projectedExpenses, projectedInvestment, projectedReserve, initInvest, initReserve, initCash, annualRate]);
 
   const rows = useMemo(() => project(projectionInput), [projectionInput]);
   const finalRow = rows.at(-1);
@@ -277,60 +282,129 @@ export function Projections({ data, month }: { data: AppData; month: string }) {
               </button>
             </div>
 
-            {proportionMode === "keep" ? (
-              <div className="proportions-badges mt-3">
-                <span className="badge">Gastos: <strong>{defaultExpensesPct}%</strong></span>
-                <span className="badge green">Investimentos: <strong>{defaultInvestmentPct}%</strong></span>
-                <span className="badge blue">Reserva: <strong>{defaultReservePct}%</strong></span>
+            {/* Barra visual de proporção proporcional */}
+            <div className="proportions-distribution-bar" title="Distribuição proporcional da renda">
+              <div
+                className="distribution-segment expenses"
+                style={{ width: `${Math.max(1, effectiveExpensesPct)}%` }}
+                title={`Gastos: ${effectiveExpensesPct}%`}
+              />
+              <div
+                className="distribution-segment investments"
+                style={{ width: `${Math.max(1, effectiveInvestmentPct)}%` }}
+                title={`Investimentos: ${effectiveInvestmentPct}%`}
+              />
+              <div
+                className="distribution-segment reserve"
+                style={{ width: `${Math.max(1, effectiveReservePct)}%` }}
+                title={`Reserva: ${effectiveReservePct}%`}
+              />
+            </div>
+
+            <div className="proportions-list">
+              {/* Item: Gastos */}
+              <div className="proportion-item">
+                <div className="proportion-header">
+                  <div className="proportion-left">
+                    <div className="proportion-icon-box expenses">
+                      <CreditCard size={15} />
+                    </div>
+                    <div className="proportion-info">
+                      <span className="proportion-label">Gastos</span>
+                      <span className="proportion-amount">{brl(projectedExpenses)} / mês</span>
+                    </div>
+                  </div>
+                  <span className="proportion-badge badge-expenses">{effectiveExpensesPct}%</span>
+                </div>
+                {proportionMode === "custom" && (
+                  <div className="proportion-slider-wrap">
+                    <input
+                      type="range"
+                      min="10"
+                      max="90"
+                      value={customExpensesPct}
+                      className="slider-expenses"
+                      onChange={e => {
+                        const val = Number(e.target.value);
+                        setCustomExpensesPct(val);
+                        const remain = 100 - val;
+                        setCustomInvestmentPct(Math.round(remain * 0.6));
+                        setCustomReservePct(remain - Math.round(remain * 0.6));
+                      }}
+                    />
+                  </div>
+                )}
               </div>
-            ) : (
-              <div className="custom-sliders mt-3">
-                <div className="slider-row">
-                  <span>Gastos ({customExpensesPct}%)</span>
-                  <input
-                    type="range"
-                    min="10"
-                    max="90"
-                    value={customExpensesPct}
-                    onChange={e => {
-                      const val = Number(e.target.value);
-                      setCustomExpensesPct(val);
-                      const remain = 100 - val;
-                      setCustomInvestmentPct(Math.round(remain * 0.6));
-                      setCustomReservePct(remain - Math.round(remain * 0.6));
-                    }}
-                  />
+
+              {/* Item: Investimentos */}
+              <div className="proportion-item">
+                <div className="proportion-header">
+                  <div className="proportion-left">
+                    <div className="proportion-icon-box investments">
+                      <TrendingUp size={15} />
+                    </div>
+                    <div className="proportion-info">
+                      <span className="proportion-label">Investimentos</span>
+                      <span className="proportion-amount">{brl(projectedInvestment)} / mês</span>
+                    </div>
+                  </div>
+                  <span className="proportion-badge badge-investments">{effectiveInvestmentPct}%</span>
                 </div>
-                <div className="slider-row">
-                  <span>Investimentos ({customInvestmentPct}%)</span>
-                  <input
-                    type="range"
-                    min="0"
-                    max={100 - customExpensesPct}
-                    value={customInvestmentPct}
-                    onChange={e => {
-                      const val = Number(e.target.value);
-                      setCustomInvestmentPct(val);
-                      setCustomReservePct(Math.max(0, 100 - customExpensesPct - val));
-                    }}
-                  />
-                </div>
-                <div className="slider-row">
-                  <span>Reserva ({customReservePct}%)</span>
-                  <input
-                    type="range"
-                    min="0"
-                    max={100 - customExpensesPct}
-                    value={customReservePct}
-                    onChange={e => {
-                      const val = Number(e.target.value);
-                      setCustomReservePct(val);
-                      setCustomInvestmentPct(Math.max(0, 100 - customExpensesPct - val));
-                    }}
-                  />
-                </div>
+                {proportionMode === "custom" && (
+                  <div className="proportion-slider-wrap">
+                    <input
+                      type="range"
+                      min="0"
+                      max={100 - customExpensesPct}
+                      value={customInvestmentPct}
+                      className="slider-investments"
+                      onChange={e => {
+                        const val = Number(e.target.value);
+                        setCustomInvestmentPct(val);
+                        setCustomReservePct(Math.max(0, 100 - customExpensesPct - val));
+                      }}
+                    />
+                  </div>
+                )}
               </div>
-            )}
+
+              {/* Item: Reserva */}
+              <div className="proportion-item">
+                <div className="proportion-header">
+                  <div className="proportion-left">
+                    <div className="proportion-icon-box reserve">
+                      <ShieldCheck size={15} />
+                    </div>
+                    <div className="proportion-info">
+                      <span className="proportion-label">Reserva de Emergência</span>
+                      <span className="proportion-amount">{brl(projectedReserve)} / mês</span>
+                    </div>
+                  </div>
+                  <span className="proportion-badge badge-reserve">{effectiveReservePct}%</span>
+                </div>
+                {proportionMode === "custom" && (
+                  <div className="proportion-slider-wrap">
+                    <input
+                      type="range"
+                      min="0"
+                      max={100 - customExpensesPct}
+                      value={customReservePct}
+                      className="slider-reserve"
+                      onChange={e => {
+                        const val = Number(e.target.value);
+                        setCustomReservePct(val);
+                        setCustomInvestmentPct(Math.max(0, 100 - customExpensesPct - val));
+                      }}
+                    />
+                  </div>
+                )}
+              </div>
+            </div>
+
+            <div className="proportion-footer">
+              <span>Total: <strong>100%</strong></span>
+              <span>Base: <strong>{brl(effectiveSalary)}/mês</strong></span>
+            </div>
           </div>
 
           {/* Card: Rentabilidade Estimada */}
@@ -451,7 +525,7 @@ export function Projections({ data, month }: { data: AppData; month: string }) {
         <Stat
           label={`Patrimônio Total em dez/${targetYear}`}
           value={finalRow ? brl(finalRow.net) : "—"}
-          detail={`Acumulado em ${totalMonths} meses projetados`}
+          detail={`Acumulado em ${totalMonths} meses projetados (de jan/2027 a dez/${targetYear})`}
           tone="accent"
         />
         <Stat
@@ -471,12 +545,26 @@ export function Projections({ data, month }: { data: AppData; month: string }) {
         />
       </div>
 
+      {/* Destaque do Início em Janeiro de 2027 */}
+      <aside className="notice flex-between" style={{ background: "rgba(4, 120, 87, 0.05)", borderColor: "rgba(4, 120, 87, 0.2)" }}>
+        <div className="flex-row items-center gap-3">
+          <ShieldCheck size={20} className="text-accent flex-shrink-0" />
+          <div className="text-xs" style={{ color: "var(--ink)" }}>
+            <strong>Trajetória de Evolução iniciando em Janeiro de 2027</strong>
+            <p className="mt-1 text-muted">
+              Ponto de partida baseado nos seus <strong>Saldos Reais de Abertura em 01/01/2027</strong> (Investimentos: {brl(initInvest)}, Reserva: {brl(initReserve)}).
+              Projeções mensais distribuídas em <strong>Gastos ({effectiveExpensesPct}% - {brl(projectedExpenses)}/mês)</strong>, <strong>Investimentos ({effectiveInvestmentPct}% - {brl(projectedInvestment)}/mês)</strong> e <strong>Reserva de Emergência ({effectiveReservePct}% - {brl(projectedReserve)}/mês)</strong>.
+            </p>
+          </div>
+        </div>
+      </aside>
+
       {/* Bloco 4: Visualização (Gráfico ou Tabelas) */}
       <section className="panel">
         <div className="panel-heading flex-between">
           <div>
             <h2>Trajetória de Evolução</h2>
-            <p>Acompanhe o crescimento do seu capital até dezembro de {targetYear}.</p>
+            <p>Acompanhe o crescimento do seu capital a partir de janeiro de 2027 até dezembro de {targetYear}.</p>
           </div>
           <div className="segmented-toggle">
             <button
@@ -569,7 +657,7 @@ export function Projections({ data, month }: { data: AppData; month: string }) {
                 <tbody>
                   {pagedRows.map(r => (
                     <tr key={r.month}>
-                      <td>{monthLabel(r.month)}</td>
+                      <td><strong>{monthLabel(r.month)}</strong></td>
                       <td>{brl(r.income)}</td>
                       <td>{brl(r.expenses)}</td>
                       <td>{brl(r.investment)}</td>

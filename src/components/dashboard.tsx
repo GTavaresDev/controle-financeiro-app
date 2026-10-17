@@ -45,6 +45,35 @@ export function Dashboard({ data, month, onNavigate }: { data: AppData; month: s
     ? d(reserveBal).div(expBaseForReserve).toFixed(1)
     : null;
 
+  // Gastos com Diversão / Lazer (Dinheiro Livre do usuário)
+  const funExpenses = activeItems
+    .filter(i => {
+      if (i.kind !== "EXPENSE") return false;
+      const nameMatch = /divers[aã]o|lazer|dinheiro\s*livre/i.test(i.name);
+      if (nameMatch) return true;
+      if (i.categoryId) {
+        const cat = data.categories.find(c => c.id === i.categoryId);
+        if (cat && /divers[aã]o|lazer|dinheiro\s*livre/i.test(cat.name)) {
+          return true;
+        }
+      }
+      return false;
+    })
+    .reduce((acc, i) => acc.plus(i.amount), d(0));
+
+  const hasFunExpense = funExpenses.gt(0);
+  const freeMoneyValue = hasFunExpense
+    ? (flow.deficit
+        ? (d(flow.free).plus(funExpenses).gt(0) ? d(flow.free).plus(funExpenses) : d(0))
+        : funExpenses.plus(d(flow.free).gt(0) ? d(flow.free) : d(0)))
+    : d(flow.free);
+
+  const freeMoneyDetail = hasFunExpense
+    ? (d(flow.free).gt(0)
+        ? `${brl(funExpenses.toString())} (Diversão) + ${brl(flow.free)} livre`
+        : "Orçado para Diversão & Lazer")
+    : "Economia excedente";
+
   // Distribution chart data
   const distRows = [
     { name: "Despesas", value: Number(flow.expenses) },
@@ -133,7 +162,13 @@ export function Dashboard({ data, month, onNavigate }: { data: AppData; month: s
             <Stat label="Receita Mensal" value={brl(flow.income)} detail="Salário + outras fontes" />
             <Stat label="Despesas Mensais" value={brl(flow.expenses)} detail={`${flow.expensePercent ?? "—"}% da renda`} />
             <Stat label="Capacidade após Despesas" value={brl(flow.capacity)} detail="Disponível para aportes" />
-            <Stat label="Livre após Aportes" value={brl(flow.free)} tone={flow.deficit ? "negative" : "accent"} detail="Economia excedente" />
+            <Stat
+              label={hasFunExpense ? "Dinheiro Livre (Diversão)" : "Livre após Aportes"}
+              value={brl(freeMoneyValue.toString())}
+              tone={flow.deficit ? "negative" : "accent"}
+              detail={freeMoneyDetail}
+              onClick={() => onNavigate("budget")}
+            />
           </div>
 
           {activeItems.length > 0 ? (

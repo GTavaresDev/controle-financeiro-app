@@ -55,7 +55,33 @@ export function project(input: ProjectionInput): ProjectionRow[] {
   let invested = d(input.initialInvestment), reserveBalance = d(input.initialReserve), cash = d(input.initialCash);
   let investmentPrincipal = invested, reservePrincipal = reserveBalance;
   const rows: ProjectionRow[] = [];
-  for (let n = 0; n < input.months; n++) {
+
+  if (input.includeBaseline) {
+    const gross = invested.plus(reserveBalance).plus(cash);
+    const principal = investmentPrincipal.plus(reservePrincipal);
+    rows.push({
+      month: input.startMonth,
+      income: "0.00",
+      expenses: "0.00",
+      investment: "0.00",
+      reserve: "0.00",
+      free: "0.00",
+      cash: money(cash),
+      invested: money(invested),
+      reserveBalance: money(reserveBalance),
+      principal: money(principal),
+      gains: "0.00",
+      tax: "0.00",
+      gross: money(gross),
+      net: money(gross),
+      feasible: true
+    });
+  }
+
+  const startIndex = input.includeBaseline ? 1 : 0;
+  const totalIterations = input.includeBaseline ? input.months + 1 : input.months;
+
+  for (let n = startIndex; n < totalIterations; n++) {
     const month = addMonths(input.startMonth, n);
     const years = Number(month.slice(0, 4)) - Number(input.startMonth.slice(0, 4));
     const values = {
@@ -80,7 +106,25 @@ export function project(input: ProjectionInput): ProjectionRow[] {
       }
     }
     const income = salary.plus(sum(input.extras.filter(e => e.date.slice(0, 7) === month).map(e => e.amount)));
-    const contribution = values.investment.toDecimalPlaces(2), reserveContribution = values.reserve.toDecimalPlaces(2);
+
+    let contribution: Decimal;
+    let reserveContribution: Decimal;
+    if (input.prioritizeReserve) {
+      const targetReserve = input.reserveTarget ? d(input.reserveTarget) : d(values.expenses).mul(input.reserveMonths ?? 6);
+      const gap = Decimal.max(0, targetReserve.minus(reserveBalance));
+      const totalSavings = values.investment.plus(values.reserve);
+      if (gap.gt(0)) {
+        reserveContribution = Decimal.min(totalSavings, gap).toDecimalPlaces(2);
+        contribution = totalSavings.minus(reserveContribution).toDecimalPlaces(2);
+      } else {
+        reserveContribution = d(0).toDecimalPlaces(2);
+        contribution = totalSavings.toDecimalPlaces(2);
+      }
+    } else {
+      contribution = values.investment.toDecimalPlaces(2);
+      reserveContribution = values.reserve.toDecimalPlaces(2);
+    }
+
     investmentPrincipal = investmentPrincipal.plus(contribution); reservePrincipal = reservePrincipal.plus(reserveContribution);
     invested = input.timing === "START" ? invested.plus(contribution).mul(rate.plus(1)) : invested.mul(rate.plus(1)).plus(contribution);
     reserveBalance = input.timing === "START" ? reserveBalance.plus(reserveContribution).mul(reserveRate.plus(1)) : reserveBalance.mul(reserveRate.plus(1)).plus(reserveContribution);

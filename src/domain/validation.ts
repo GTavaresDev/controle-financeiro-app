@@ -34,6 +34,10 @@ export const projectionSchema = z.object({
   }).refine(e => e.mode !== "SET" || d(e.amount).gte(0), "Valor de substituição não pode ser negativo.")
     .refine(e => !e.endMonth || e.endMonth >= e.month, "Fim anterior ao início.")).max(100),
   extras: z.array(z.object({ date: dateSchema, amount: amountSchema, name: z.string().max(120) })).max(300),
+  prioritizeReserve: z.boolean().optional(),
+  reserveMonths: z.number().int().min(0).max(120).optional(),
+  reserveTarget: amountSchema.optional(),
+  includeBaseline: z.boolean().optional(),
 });
 export const movementSchema = z.object({
   name: z.string().trim().min(1).max(120), kind: z.enum(["INCOME", "EXPENSE", "TRANSFER", "YIELD"]),
