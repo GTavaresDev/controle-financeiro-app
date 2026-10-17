@@ -1,8 +1,7 @@
 import ExcelJS from "exceljs";
 import JSZip from "jszip";
-import { createHash } from "node:crypto";
-import { Prisma } from "@prisma/client";
-import { db } from "./db";
+import { createHash, randomUUID } from "node:crypto";
+import { query, transaction } from "./db";
 import { initialize, json } from "./store";
 import { d, money, sum, addMonths } from "@/domain/finance";
 import { monthSchema } from "@/domain/validation";
@@ -16,6 +15,7 @@ export interface ImportPreview {
   cells: { sheet: string; cell: string; value: string; formula: string | null }[];
   warnings: string[]; differences: { name: string; previous: string | null; next: string }[];
 }
+
 export async function parseWorkbook(bytes: Uint8Array, filename: string): Promise<ImportPreview> {
   if (bytes.byteLength > 5 * 1024 * 1024) throw Error("Use um arquivo de até 5 MB.");
   const zip = await JSZip.loadAsync(bytes);
@@ -60,12 +60,14 @@ export async function parseWorkbook(bytes: Uint8Array, filename: string): Promis
     target: numeric("Meta 2026", "B5"), opening2026: numeric("Meta 2026", "B13"),
     opening2027: numeric("Projeção 2027", "B10"), reserve2027: numeric("Projeção 2027", "B11"), cells, warnings, differences: [] };
 }
+
 export function importItems(p: ImportPreview) {
   return [{ sourceKey: "excel:salary", name: "Salário", kind: "INCOME", amount: p.income },
     { sourceKey: "excel:investment", name: "Investimento mensal", kind: "INVESTMENT", amount: p.investment },
     { sourceKey: "excel:reserve", name: "Reserva de emergência", kind: "RESERVE", amount: p.reserve },
     ...p.expenses.map(e => ({ sourceKey: `excel:expense:${e.cell}`, name: e.name, kind: "EXPENSE", amount: e.amount }))];
 }
+
 export function originalScenario(p: ImportPreview, year: 2026 | 2027): ProjectionInput {
   return { startMonth: year === 2026 ? "2026-10" : "2027-01", months: year === 2026 ? 3 : 12,
     salary: p.income, expenses: p.totalExpenses, investment: p.investment, reserve: p.reserve,
@@ -73,41 +75,104 @@ export function originalScenario(p: ImportPreview, year: 2026 | 2027): Projectio
     initialCash: "0", annualRate: "0", reserveAnnualRate: "0", taxRate: "0", salaryGrowth: "0", expenseInflation: "0",
     annualContributionIncrease: "0", timing: "END", salaryDay: 31, salaryOffset: 0, events: [], extras: [] };
 }
+
 export async function previewWorkbook(bytes: Uint8Array, filename: string) {
   const p = await parseWorkbook(bytes, filename);
-  const [batch, items] = await Promise.all([db.importBatch.findUnique({ where: { hash: p.hash } }), db.budgetItem.findMany({ where: { sourceKey: { not: null } } })]);
-  p.alreadyImported = !!batch;
-  p.differences = importItems(p).map(item => ({ name: item.name, previous: items.find(i => i.sourceKey === item.sourceKey)?.amount.toFixed(2) ?? null, next: item.amount }));
+  const [batchRes, itemsRes] = await Promise.all([
+    query<{ id: string }>(`SELECT id FROM "ImportBatch" WHERE hash = $1`, [p.hash]),
+    query<{ sourceKey: string; amount: string }>(`SELECT "sourceKey", amount FROM "BudgetItem" WHERE "sourceKey" IS NOT NULL`),
+  ]);
+  p.alreadyImported = (batchRes.rowCount ?? 0) > 0;
+  p.differences = importItems(p).map(item => {
+    const found = itemsRes.rows.find(i => i.sourceKey === item.sourceKey);
+    return {
+      name: item.name,
+      previous: found?.amount ? Number(found.amount).toFixed(2) : null,
+      next: item.amount,
+    };
+  });
   return p;
 }
+
 export async function commitWorkbook(bytes: Uint8Array, filename: string, startMonth: string) {
   monthSchema.parse(startMonth);
   const p = await parseWorkbook(bytes, filename);
   await initialize();
-  return db.$transaction(async tx => {
-    if (await tx.importBatch.findUnique({ where: { hash: p.hash } })) return { imported: false, message: "Este arquivo já foi importado. Nenhum registro foi duplicado." };
+  return transaction(async client => {
+    const existingBatch = await client.query(`SELECT id FROM "ImportBatch" WHERE hash = $1`, [p.hash]);
+    if ((existingBatch.rowCount ?? 0) > 0) return { imported: false, message: "Este arquivo já foi importado. Nenhum registro foi duplicado." };
+
     for (const item of importItems(p)) {
-      const current = await tx.budgetItem.findUnique({ where: { sourceKey: item.sourceKey } });
-      const category = item.kind === "EXPENSE" ? await tx.category.upsert({ where: { name: item.name }, create: { name: item.name }, update: {} }) : null;
-      const data = { ...item, startMonth, recurring: true, categoryId: category?.id ?? null };
+      const currentRes = await client.query(`SELECT * FROM "BudgetItem" WHERE "sourceKey" = $1`, [item.sourceKey]);
+      const current = currentRes.rows[0];
+
+      let categoryId: string | null = null;
+      if (item.kind === "EXPENSE") {
+        const catRes = await client.query(`
+          INSERT INTO "Category" (id, name)
+          VALUES ($1, $2)
+          ON CONFLICT (name) DO UPDATE SET name = EXCLUDED.name
+          RETURNING id
+        `, [randomUUID(), item.name]);
+        categoryId = catRes.rows[0].id;
+      }
+
       if (current) {
         if (startMonth < current.startMonth) throw Error("A reimportação deve começar no mesmo mês ou depois do planejamento existente.");
-        if (await tx.movement.count({ where: { itemId: current.id, month: { gte: startMonth }, voidedAt: null } })) throw Error("Há pagamentos no período da reimportação. Escolha um mês posterior.");
+        const paidRes = await client.query(`SELECT COUNT(*)::int as count FROM "Movement" WHERE "itemId" = $1 AND month >= $2 AND "voidedAt" IS NULL`, [current.id, startMonth]);
+        if (paidRes.rows[0].count > 0) throw Error("Há pagamentos no período da reimportação. Escolha um mês posterior.");
         if (startMonth > current.startMonth) {
-          await tx.budgetItem.update({ where: { id: current.id }, data: { endMonth: addMonths(startMonth, -1), sourceKey: null } });
-          await tx.budgetItem.create({ data });
-        } else await tx.budgetItem.update({ where: { id: current.id }, data });
-      } else await tx.budgetItem.create({ data });
+          await client.query(`UPDATE "BudgetItem" SET "endMonth" = $1, "sourceKey" = NULL WHERE id = $2`, [addMonths(startMonth, -1), current.id]);
+          await client.query(`
+            INSERT INTO "BudgetItem" (id, name, kind, amount, "startMonth", "endMonth", recurring, "categoryId", "sourceKey")
+            VALUES ($1, $2, $3, $4, $5, NULL, true, $6, $7)
+          `, [randomUUID(), item.name, item.kind, item.amount, startMonth, categoryId, item.sourceKey]);
+        } else {
+          await client.query(`
+            UPDATE "BudgetItem"
+            SET name = $1, kind = $2, amount = $3, "startMonth" = $4, recurring = true, "categoryId" = $5
+            WHERE id = $6
+          `, [item.name, item.kind, item.amount, startMonth, categoryId, current.id]);
+        }
+      } else {
+        await client.query(`
+          INSERT INTO "BudgetItem" (id, name, kind, amount, "startMonth", "endMonth", recurring, "categoryId", "sourceKey")
+          VALUES ($1, $2, $3, $4, $5, NULL, true, $6, $7)
+        `, [randomUUID(), item.name, item.kind, item.amount, startMonth, categoryId, item.sourceKey]);
+      }
     }
-    const investmentAccount = await tx.account.findUniqueOrThrow({ where: { kind: "INVESTMENT" } });
-    const goal = { name: "Meta de investimento 2026", kind: "INVESTMENT", description: "Meta original da planilha. O saldo atual depende da conta de investimentos.", target: p.target, contribution: p.investment, startDate: "2026-10-01", deadline: "2026-12-31", accountId: investmentAccount.id };
-    await tx.financialGoal.upsert({ where: { sourceKey: "excel:goal:2026" }, create: { ...goal, sourceKey: "excel:goal:2026" }, update: { target: p.target, contribution: p.investment } });
+
+    const invAccRes = await client.query(`SELECT id FROM "Account" WHERE kind = 'INVESTMENT'`);
+    if (!invAccRes.rowCount) throw Error("Conta de investimento não encontrada.");
+    const investmentAccountId = invAccRes.rows[0].id;
+
+    await client.query(`
+      INSERT INTO "FinancialGoal" (id, name, kind, description, target, contribution, "startDate", deadline, "accountId", "sourceKey")
+      VALUES ($1, $2, 'INVESTMENT', $3, $4, $5, '2026-10-01', '2026-12-31', $6, 'excel:goal:2026')
+      ON CONFLICT ("sourceKey")
+      DO UPDATE SET target = EXCLUDED.target, contribution = EXCLUDED.contribution
+    `, [randomUUID(), "Meta de investimento 2026", "Meta original da planilha. O saldo atual depende da conta de investimentos.", p.target, p.investment, investmentAccountId]);
+
     for (const year of [2026, 2027] as const) {
-      const parameters = json<Prisma.InputJsonValue>(originalScenario(p, year));
-      await tx.projectionScenario.upsert({ where: { sourceKey: `excel:scenario:${year}` }, create: { sourceKey: `excel:scenario:${year}`, name: `Base Excel ${year}`, parameters }, update: { parameters } });
+      const parameters = originalScenario(p, year);
+      await client.query(`
+        INSERT INTO "ProjectionScenario" (id, name, parameters, "sourceKey", "updatedAt")
+        VALUES ($1, $2, $3::jsonb, $4, NOW())
+        ON CONFLICT ("sourceKey")
+        DO UPDATE SET parameters = EXCLUDED.parameters, "updatedAt" = NOW()
+      `, [randomUUID(), `Base Excel ${year}`, JSON.stringify(parameters), `excel:scenario:${year}`]);
     }
-    await tx.importBatch.create({ data: { hash: p.hash, filename: p.filename, data: json<Prisma.InputJsonValue>(p) } });
-    await tx.auditEvent.create({ data: { action: "excel.import", data: { hash: p.hash, startMonth } } });
+
+    await client.query(`
+      INSERT INTO "ImportBatch" (id, hash, filename, data, "createdAt")
+      VALUES ($1, $2, $3, $4::jsonb, NOW())
+    `, [randomUUID(), p.hash, p.filename, JSON.stringify(p)]);
+
+    await client.query(`
+      INSERT INTO "AuditEvent" (id, action, data, "createdAt")
+      VALUES ($1, 'excel.import', $2::jsonb, NOW())
+    `, [randomUUID(), JSON.stringify({ hash: p.hash, startMonth })]);
+
     return { imported: true, message: "Planejamento importado. Informe os saldos reais para completar seu painel." };
-  }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable, timeout: 30000 });
+  });
 }
